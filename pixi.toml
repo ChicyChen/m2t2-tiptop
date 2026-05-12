@@ -1,0 +1,80 @@
+# pixi env for the M2T2 grasp server consumed by TiPToP.
+#
+# Why pixi (not conda):
+#   - tiptop's own env is already pixi; one tool to install + run everything.
+#   - sidesteps the anaconda Terms-of-Service prompt that conda 25+ requires
+#     on the implicit main/r channels.
+#
+# Why Python 3.10 + torch 2.0.1 + CUDA 11.7 specifically:
+#   - M2T2's pointnet2_ops/setup.py builds against torch.cuda + nvcc; the
+#     last torch that supports CUDA 11.7 is 2.0.x. Newer torch needs cu118+.
+#   - Isaac Lab 2.2.0 container ships CUDA 12 — we can't reuse its toolchain
+#     for this build.
+#
+# Bring-up:
+#   pixi install        # conda-forge + nvidia label packages
+#   pixi run build      # pip-install torch 2.0.1+cu117 + pointnet2_ops + m2t2
+#   pixi run server     # python m2t2_server.py
+
+[workspace]
+name = "m2t2-tiptop"
+version = "0.1.0"
+channels = ["nvidia/label/cuda-11.7.0", "conda-forge"]
+platforms = ["linux-64"]
+
+[system-requirements]
+cuda = "11"
+libc = { family = "glibc", version = "2.31" }
+
+[dependencies]
+python = "3.10.*"
+pip = ">=21.3"
+# Build toolchain — CUDA 11.7's nvcc can't compile with gcc>=12.
+"cuda-toolkit" = "11.7.*"
+"gcc_linux-64" = "<12"
+"gxx_linux-64" = "<12"
+# Keep pkg_resources for torch 2.0.x's importer.
+setuptools = "<70"
+
+[tasks]
+# One-shot build: torch 2.0.1+cu117 + pointnet2_ops + m2t2 (editable).
+# pip-install the torch wheels (conda-forge's pytorch doesn't ship a 2.0.1
+# CUDA 11.7 build), then build pointnet2_ops against the activated env's
+# nvcc / gcc<12, then install M2T2 itself + its requirements + numpy<2 pin.
+# Idempotent: pip skips already-installed packages on rerun.
+build = '''
+bash -c '
+  set -e
+  export CUDA_HOME="$CONDA_PREFIX"
+  export PATH="$CONDA_PREFIX/bin:$PATH"
+  if [ ! -f m2t2/__init__.py ]; then
+    echo "[m2t2 build] FATAL: m2t2/__init__.py missing — refusing to build" >&2
+    exit 1
+  fi
+  python -m pip install --quiet \
+    torch==2.0.1 torchvision==0.15.2 \
+    --index-url https://download.pytorch.org/whl/cu117
+  python -m pip install --quiet --no-build-isolation ./pointnet2_ops/
+  python -m pip install --quiet -r requirements.txt
+  python -m pip install --quiet -e .
+  # Re-pin numpy<2 in case requirements.txt pulled a newer one in. torch
+  # 2.0.1 raises "Numpy is not available" on numpy 2.x.
+  python -m pip install --quiet "numpy<2"
+  python -m pip install --quiet huggingface_hub hf_transfer
+'
+'''
+
+# Run the FastAPI grasp server. Pass flags after `--`, e.g.
+#   pixi run server -- --port 8123
+server = "python m2t2_server.py"
+
+# Sanity-check the install (imports + torch.from_numpy round-trip).
+check = '''
+python -c "
+import m2t2, torch, numpy
+print('m2t2:', m2t2.__file__)
+print('torch:', torch.__version__, 'cuda:', torch.version.cuda)
+print('numpy:', numpy.__version__)
+print('from_numpy:', torch.from_numpy(numpy.array([1,2,3])))
+"
+'''
